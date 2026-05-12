@@ -2,6 +2,7 @@
 import os
 import json
 import sys
+import argparse
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,16 @@ except ImportError:
 HISTORY_FILE = "chat_history.json"
 MODEL_NAME   = "nvidia/nemotron-3-super-120b-a12b:free"
 
+# ── Colors ──────────────────────────────────────────────────────────────
+CYAN    = "\033[96m"
+GREEN   = "\033[92m"
+YELLOW  = "\033[93m"
+RED     = "\033[91m"
+BOLD    = "\033[1m"
+DIM     = "\033[2m"
+RESET   = "\033[0m"
+# ────────────────────────────────────────────────────────────────────────
+
 def load_history():
     if Path(HISTORY_FILE).exists():
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
@@ -24,8 +35,12 @@ def save_history(history):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
-def format_for_api(history):
-    return [{"role": msg["role"], "content": msg["content"]} for msg in history]
+def format_for_api(history, system_prompt=None):
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages += [{"role": msg["role"], "content": msg["content"]} for msg in history]
+    return messages
 
 def get_api_key():
     key = os.environ.get("OPENROUTER_API_KEY", "").strip()
@@ -36,7 +51,7 @@ def get_api_key():
         sys.exit(1)
     return key
 
-def chat_loop():
+def chat_loop(system_prompt=None):
     client = openai.OpenAI(
         api_key=get_api_key(),
         base_url="https://openrouter.ai/api/v1"
@@ -44,38 +59,42 @@ def chat_loop():
 
     history = load_history()
 
-    print(f"\n{'='*50}")
-    print(f"  CLI Chatbot  |  Model: {MODEL_NAME}")
-    print(f"  Commands: quit | clear | history")
-    print(f"{'='*50}\n")
+    print(f"\n{BOLD}{CYAN}{'='*50}{RESET}")
+    print(f"{BOLD}{CYAN}  🤖 CLI Chatbot  |  Model: {MODEL_NAME}{RESET}")
+    if system_prompt:
+        print(f"{YELLOW}  Role: {system_prompt[:60]}{'...' if len(system_prompt) > 60 else ''}{RESET}")
+    print(f"{DIM}  Commands: quit | clear | history{RESET}")
+    print(f"{BOLD}{CYAN}{'='*50}{RESET}\n")
 
     while True:
         try:
-            user_input = input("You: ").strip()
+            user_input = input(f"{BOLD}{GREEN}You: {RESET}").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nBye!")
+            print(f"\n{DIM}Bye!{RESET}")
             break
 
         if not user_input:
             continue
 
         if user_input.lower() == "quit":
-            print("Bye!")
+            print(f"{DIM}Bye!{RESET}")
             break
 
         if user_input.lower() == "clear":
             history = []
             save_history(history)
-            print("[History cleared]\n")
+            print(f"{YELLOW}[History cleared]{RESET}\n")
             continue
 
         if user_input.lower() == "history":
             if not history:
-                print("[No history yet]\n")
+                print(f"{YELLOW}[No history yet]{RESET}\n")
             else:
                 for i, msg in enumerate(history, 1):
-                    role = "You" if msg["role"] == "user" else "Bot"
-                    print(f"[{i}] {role}: {msg['content'][:80]}")
+                    if msg["role"] == "user":
+                        print(f"{DIM}[{i}]{RESET} {GREEN}You:{RESET} {msg['content'][:80]}")
+                    else:
+                        print(f"{DIM}[{i}]{RESET} {CYAN}Bot:{RESET} {msg['content'][:80]}")
                 print()
             continue
 
@@ -83,19 +102,31 @@ def chat_loop():
         history.append({"role": "user", "content": user_input, "timestamp": timestamp})
 
         try:
-            response = client.chat.completions.create(
+            stream = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=format_for_api(history)
+                messages=format_for_api(history, system_prompt),
+                stream=True
             )
-            bot_reply = response.choices[0].message.content.strip()
+            print(f"\n{BOLD}{CYAN}Bot:{RESET} ", end="", flush=True)
+            bot_reply = ""
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content
+                if delta:
+                    print(delta, end="", flush=True)
+                    bot_reply += delta
+            print("\n")
+            bot_reply = bot_reply.strip()
         except Exception as e:
-            print(f"\n[Error] {e}\n")
+            print(f"\n{RED}[Error] {e}{RESET}\n")
             history.pop()
             continue
 
         history.append({"role": "assistant", "content": bot_reply, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
         save_history(history)
-        print(f"\nBot: {bot_reply}\n")
 
 if __name__ == "__main__":
-    chat_loop()
+    parser = argparse.ArgumentParser(description="AI CLI Chatbot")
+    parser.add_argument("--system", type=str, help="Chatbot ko role do", default=None)
+    args = parser.parse_args()
+
+    chat_loop(system_prompt=args.system)
